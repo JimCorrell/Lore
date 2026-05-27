@@ -17,14 +17,28 @@ metadata:
 | pydantic | 2.7.1 | Data validation / schemas |
 | pydantic-settings | 2.2.1 | `.env`-backed settings |
 | python-dotenv | 1.0.1 | `.env` file loading |
-| anthropic | 0.28.0 | Claude API client (Phase 1 extraction) |
+| anthropic | >=0.40.0 | Claude API client (Phase 1 extraction) |
 | tiktoken | 0.7.0 | Token counting (for chunking) |
 
-**Note:** The ORM layer uses **sync SQLAlchemy** (psycopg2), not async. The CLAUDE.md says "async everywhere in FastAPI routes" but the current implementation uses sync `Session` + `get_db()` dependency. This is the current state; async migration may come in a later phase.
+**anthropic version note:** Pinned to `>=0.40.0` because 0.28.0 was incompatible with httpx 0.28.x (`proxies` kwarg removed). Always use a recent SDK version.
+
+**Dev-only deps** (not in requirements.txt, install manually): `ruff`, `pytest`, `httpx`
+```bash
+.venv/bin/pip install ruff pytest httpx
+```
+
+**Note:** The ORM layer uses **sync SQLAlchemy** (psycopg2), not async. The CLAUDE.md says "async everywhere in FastAPI routes" but the current implementation uses sync `Session` + `get_db()` dependency.
 
 ## Python Version
 
 `.python-version` pins the project to Python 3.12.
+
+## Virtual Environment
+
+`.venv` is managed manually (not uv, despite CLAUDE.md). The venv path is hardcoded into its own scripts, so if the project directory is moved or renamed, the venv breaks — recreate it with:
+```bash
+rm -rf .venv && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt ruff pytest httpx
+```
 
 ## Database
 
@@ -33,8 +47,13 @@ metadata:
 - Container name: `lore-postgres`
 - Credentials: `lore / lore_dev / lore` (user/password/db)
 - Data volume: `lore_pgdata` (persists across `docker compose down`)
-- Required extensions: `pg_trgm` (trigram/Levenshtein for entity resolver — created by migration 0001)
-- Planned extension: `vector` (pgvector for semantic search — commented out in migration 0001, Phase 4)
+- Required extensions: `pg_trgm` (created by migration 0001)
+- Planned extension: `vector` (pgvector — commented out in migration 0001, Phase 4)
+- Test database: `lore_test` on same host/port — must be created manually and have `pg_trgm` installed:
+  ```bash
+  docker exec lore-postgres psql -U lore -c "CREATE DATABASE lore_test;"
+  docker exec lore-postgres psql -U lore -d lore_test -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+  ```
 
 ## Environment Variables (.env)
 
@@ -48,31 +67,32 @@ metadata:
 
 Config is loaded via `pydantic-settings` in `app/config.py` → `Settings` class → singleton `settings` object.
 
-## Dev Tooling
+## Makefile Targets
 
-**Start dev environment:**
 ```bash
-make dev
-# equivalent to: docker compose up -d && .venv/bin/uvicorn app.main:app --reload
+make dev      # docker compose up -d && uvicorn --reload (foreground)
+make stop     # pkill uvicorn
+make restart  # stop + dev
+make migrate  # alembic upgrade head
+make test     # pytest tests/ -v
 ```
 
-**Migrations:**
+**`--reload` warning:** uvicorn's `--reload` kills background tasks when source files change. If you edit files while a document is ingesting, the background task will be killed mid-run and the document may be left in `processing` state. Use `make restart` for a clean restart between editing and testing.
+
+## Migrations
+
 ```bash
-alembic upgrade head          # apply all pending
-alembic downgrade -1          # roll back one
-alembic current               # check state
-alembic revision --autogenerate -m "describe change"  # new migration
+make migrate                               # apply all pending
+.venv/bin/alembic downgrade -1            # roll back one
+.venv/bin/alembic current                 # check state
+.venv/bin/alembic revision --autogenerate -m "describe change"  # new migration
 ```
 
-**Alembic config:** `alembic.ini` has no `sqlalchemy.url` — the URL is injected at runtime from `settings.database_url` in `alembic/env.py`. All ORM models are imported via `import app.models` (the `__init__.py` imports all six models) so Alembic's autogenerate sees the full schema.
-
-**Linting/formatting:** ruff (not black). CLAUDE.md: `ruff format + ruff check`.
-
-**Invocation:** CLAUDE.md specifies `uv run` for all invocations, but the Makefile uses `.venv/bin/uvicorn` directly. The `.venv` is managed manually (or via uv).
+**Alembic config:** `alembic.ini` has no `sqlalchemy.url` — injected at runtime from `settings.database_url` in `alembic/env.py`. All ORM models are imported via `import app.models` so autogenerate sees the full schema.
 
 ## App Entry Point
 
-`app/main.py` — `FastAPI` instance named `app`, with a no-op lifespan context. Database connections are managed per-request via `get_db()` dependency (no connection pool held across requests beyond SQLAlchemy's pool).
+`app/main.py` — `FastAPI` instance named `app`, no-op lifespan. Database connections managed per-request via `get_db()` dependency. Background tasks open their own `SessionLocal()` session.
 
 ## Interactive Docs
 

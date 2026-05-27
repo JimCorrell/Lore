@@ -28,12 +28,13 @@ A **Document** is a source text ingested into a domain. Key fields:
 - `external_id` — caller-supplied stable ID (ISBN, comic issue ID); unique per domain
 - `ingestion_status` — `pending | processing | complete | failed`
 - Deleting or re-ingesting a document cascades to its Appearances (and transitively to EntityLinks)
+- No `updated_at` column — only `ingested_at`
 
 An **Entity** is a canonical record for a named thing in a domain. Key fields:
-- `canonical_name` + `aliases` (ARRAY) — the authoritative name and all known alternate forms
+- `canonical_name` + `aliases` (ARRAY(Text())) — the authoritative name and all known alternate forms
 - `entity_type` (mapped to DB column `type`) — avoids shadowing SQLAlchemy's polymorphic `type`
 - `attributes` (JSONB) — merged/aggregated attributes across all appearances
-- `appearance_count` — denormalized count updated at ingest time
+- `appearance_count` — denormalized count incremented at ingest time (not decremented on document delete — known Phase 1 limitation)
 - `merge_status` — `clean | auto_merged`; `auto_merged` flags entities that need human review
 - `merged_from` (ARRAY of UUIDs) — soft record of which entity IDs were absorbed
 
@@ -61,29 +62,53 @@ A **MergeEvent** is a permanent audit log entry for automatic entity merges. Fie
 - `reviewed / reviewed_by / reviewed_at` — human review workflow (Phase 3)
 - Never deleted on re-ingestion — merge history is always auditable
 
+## Ingestion Pipeline
+
+`POST /api/v1/documents` → background task → `ingestor.py` → `extraction.py` (Claude API, chunked) → `resolver.py` (SQL dedup) → write Appearances + EntityLinks.
+
+**Extraction:** tiktoken `cl100k_base`, 1,500 tokens/chunk, 150-token overlap. One `claude-sonnet-4-6` call per chunk via `tool_choice={"type": "any"}`, forcing use of the `record_extractions` tool.
+
+**Entity resolution (3-step ladder per entity name):**
+1. Exact `canonical_name` match (case-insensitive)
+2. Exact alias match via `= ANY(aliases)` (uses GIN index)
+3. Trigram similarity ≥ 0.65 via pg_trgm `similarity()` function
+
+Fuzzy hits set `merge_status="auto_merged"`, append the absorbed name to `aliases`, and write a `MergeEvent`. Exact hits just increment `appearance_count`. Misses create a new Entity.
+
+**Re-ingestion:** if `external_id` already exists in the domain, delete appearances (CASCADE handles entity_links), reset status to `pending`, update metadata, re-queue. Returns 409 if currently `processing`.
+
 ## Schema Decisions
 
-**pg_trgm extension** is created in migration 0001. Required by the entity resolver for Levenshtein and trigram similarity matching on entity names.
+**pg_trgm extension** is created in migration 0001. Required by the entity resolver for trigram similarity matching on entity names.
 
-**pgvector / embeddings** are stubbed but commented out in migration 0001. Phase 4 will add `vector(1024)` columns to `entities` and `appearances`. The `CREATE EXTENSION vector` is already written as a comment to make Phase 4 a one-line migration.
+**pgvector / embeddings** are stubbed but commented out in migration 0001. Phase 4 will add `vector(1024)` columns to `entities` and `appearances`.
 
-**GIN index on entities.aliases** (`idx_entities_aliases`) enables efficient `@>` containment queries to look up entities by alias.
+**GIN index on entities.aliases** (`idx_entities_aliases`) — alias lookup uses `= ANY(aliases)` (NOT `@>`) to avoid PostgreSQL type cast issues between `text` and `varchar` array types.
 
-**Bidirectional links as two rows** is a deliberate denormalization. Clients never need to query both `from_entity_id` and `to_entity_id` to find all relationships — a single `WHERE from_entity_id = ?` always returns the complete picture for directed traversal.
+**Bidirectional links as two rows** is a deliberate denormalization. Clients never need to query both `from_entity_id` and `to_entity_id`.
 
-**Domain ID is a slug string** (not UUID) — `domains.id` is `String(64)`, e.g. `"star-wars"`. This is a stable caller-chosen key, not a generated UUID. All other tables use `gen_random_uuid()` PKs.
+**Domain ID is a slug string** (not UUID) — `domains.id` is `String(64)`, e.g. `"star-wars"`. All other tables use `gen_random_uuid()` PKs.
 
-**SQLAlchemy column name aliasing**: `Entity.entity_type` maps to DB column `type` (avoids shadowing SQLAlchemy's polymorphic attribute). `Document.extra_metadata` maps to DB column `metadata` (avoids shadowing SQLAlchemy's `Base.metadata`).
+**SQLAlchemy column name aliasing**: `Entity.entity_type` maps to DB column `type`. `Document.extra_metadata` maps to DB column `metadata`.
 
-**ingestion_status lifecycle**: Documents are created as `pending`, move to `processing` during LLM extraction, then `complete` or `failed`. Re-ingestion of an existing document deletes all its Appearances (via CASCADE) and resets the status to `pending`.
+**`aliases` column is `text[]`** — ORM model uses `ARRAY(Text())` to match the migration's `postgresql.ARRAY(sa.Text())`. Using `ARRAY(String)` (varchar[]) causes `= ANY()` type mismatches with the stored `text[]`.
 
-## API Surface (current)
+**ingestion_status lifecycle**: `pending → processing → complete | failed`. Background task opens its own `SessionLocal()` session — never reuses the request session.
+
+## API Surface
 
 All routes under `/api/v1/`:
 - `GET /domains` — list all domains ordered by name
-- `POST /domains` — register a new domain (slug ID, must not already exist)
+- `POST /domains` — register a new domain
 - `GET /domains/{domain_id}` — get one domain
-- `PATCH /domains/{domain_id}` — partial update (only present fields applied); updating entity_types/relation_types does not retroactively change existing extractions
+- `PATCH /domains/{domain_id}` — partial update
+- `POST /documents` — register + ingest (returns immediately, extraction runs in background)
+- `GET /documents` — list documents (filter: domain_id, ingestion_status, limit, offset)
+- `GET /documents/{id}` — get one document (use for status polling)
+- `DELETE /documents/{id}` — delete document + cascade
+- `GET /entities` — list entities (filter: domain_id, entity_type, merge_status, limit, offset)
+- `GET /entities/{id}` — get one entity
+- `GET /entities/{id}/biography` — entity + appearances ordered by timeline_position → published_at → passage_index (all NULLS LAST)
 
 `GET /health` — liveness check including DB connectivity
 
@@ -91,7 +116,7 @@ All routes under `/api/v1/`:
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Core ingestion pipeline | In progress |
+| 1 | Core ingestion pipeline | **Complete** |
 | 2 | MCP server + graph API | Planned |
 | 3 | Human review layer (MergeEvent review endpoints) | Planned |
 | 4 | Chronicle integration + embeddings/vector search | Planned |
@@ -101,26 +126,37 @@ All routes under `/api/v1/`:
 
 ```
 app/
-  main.py            — FastAPI app + lifespan (no startup/shutdown logic yet)
-  config.py          — Settings via pydantic-settings (.env: DATABASE_URL, ANTHROPIC_API_KEY, API_KEY)
+  main.py            — FastAPI app + lifespan
+  config.py          — Settings via pydantic-settings (.env)
   database.py        — Sync SQLAlchemy engine, SessionLocal, Base, get_db dependency
   models/
     domain.py        — Domain ORM model
     document.py      — Document ORM model
-    entity.py        — Entity ORM model
-    appearance.py    — Appearance ORM model (atomic extraction unit)
-    entity_link.py   — EntityLink ORM model (directed graph edges)
+    entity.py        — Entity ORM model (aliases: ARRAY(Text()))
+    appearance.py    — Appearance ORM model
+    entity_link.py   — EntityLink ORM model
     merge_event.py   — MergeEvent ORM model (audit log)
   routers/
-    health.py        — /health endpoint
+    health.py        — /health
     domains.py       — /api/v1/domains CRUD
+    documents.py     — /api/v1/documents CRUD + ingest
+    entities.py      — /api/v1/entities read-only + biography
   schemas/
-    domain.py        — DomainCreate, DomainUpdate, DomainResponse + RelationType Pydantic models
+    domain.py        — DomainCreate, DomainUpdate, DomainResponse
+    documents.py     — DocumentCreate, DocumentResponse
+    entities.py      — EntityResponse, AppearanceResponse, BiographyResponse
+  services/
+    extraction.py    — Claude API wrapper (chunking + tool-use extraction)
+    resolver.py      — Entity dedup: exact name → exact alias → fuzzy trigram
+    ingestor.py      — Orchestration: extract → resolve → write appearances/links
 alembic/
   versions/
     001_initial_schema.py  — All tables, indexes, pg_trgm extension
     002_seed_domains.py    — Seeds star-wars and real-world domains
+tests/
+  conftest.py        — rollback-per-test fixtures, test DB (lore_test), star_wars_domain fixture
+  test_documents.py  — document CRUD + ingest endpoint tests
+  test_entities.py   — entity list/get/biography tests
+  test_resolver.py   — resolver unit tests (real PG, no mock)
+  test_ingestor.py   — full pipeline tests (mock Claude)
 ```
-
-**Why:** Architecture memory for future conversations — covers schema shape, key design decisions, and phase plan so we don't re-derive them from code each time.
-**How to apply:** Use when designing new features, planning migrations, or evaluating whether a proposed change is consistent with existing patterns.

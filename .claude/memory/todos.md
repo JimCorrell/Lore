@@ -5,57 +5,51 @@ metadata:
   type: project
 ---
 
-## Current Phase: Phase 1 — Core Ingestion Pipeline
+## Phase 1 — Core Ingestion Pipeline: COMPLETE (2026-05-27)
 
-Phase 1 is in progress as of 2026-05-27. The database schema and domain management API are complete. What's not yet built:
+All Phase 1 work is done and tested. The full pipeline is live:
+- `POST /api/v1/documents` → background extraction via Claude → entity resolution → appearances/links
+- `GET /api/v1/entities` + `GET /api/v1/entities/{id}/biography`
+- 40 integration tests passing
 
-### Phase 1 remaining work
+### Known Phase 1 limitations (deferred to Phase 2)
 
-- **Document ingestion endpoint** — `POST /api/v1/documents` to register a document and kick off extraction
-- **Extraction service** (`app/services/extraction.py`) — calls Claude API to extract entities and relationships from document text; writes Appearances and EntityLinks
-- **Entity resolver** (`app/services/resolver.py`) — deduplicates extracted entity names against existing entities using pg_trgm (fuzzy match), writes MergeEvents for auto-merges, sets `merge_status = "auto_merged"` on fuzzy hits
-- **Document status polling** — `GET /api/v1/documents/{id}` to check ingestion_status
-- **Chunking logic** — tiktoken is already in requirements for this; splits long documents into passages before extraction, populates `appearance.passage_index`
-- **Entity CRUD** — `GET /api/v1/entities`, `GET /api/v1/entities/{id}` (canonical record), biography assembly endpoint
-- **appearance_count maintenance** — increment/decrement on Entity when Appearances are written/deleted
+- `appearance_count` is not decremented when a document is deleted (stale but acceptable)
+- Fuzzy matching only runs against `canonical_name`, not individual alias values
+- Extraction model (`claude-sonnet-4-6`) and chunk sizes (1500/150 tokens) are hard-coded constants in `extraction.py`
 
-### Phase 2 — MCP Server + Graph API (Planned)
+---
 
-- MCP server exposing Lore as a tool for Claude (likely `GET /api/v1/entities/{id}/biography` and graph traversal)
-- Graph traversal endpoints — neighbors, shortest path, subgraph by entity type
-- Knowledge graph export (e.g. JSON-LD or custom format)
+## Phase 2 — MCP Server + Graph API (Next)
 
-### Phase 3 — Human Review Layer (Planned)
+- MCP server exposing Lore as a tool for Claude
+- Graph traversal endpoints — neighbors, subgraph by entity type
+- `GET /api/v1/entities/{id}/links` — outbound relationships for an entity
+- Knowledge graph export
+- Move `EXTRACTION_MODEL`, `CHUNK_SIZE_TOKENS`, `CHUNK_OVERLAP_TOKENS`, `FUZZY_THRESHOLD` to `Settings`
+- Fix stale `appearance_count` on document delete
+
+## Phase 3 — Human Review Layer (Planned)
 
 - Review endpoints against `merge_events` table — list unreviewed merges, approve/reject
-- `reviewed / reviewed_by / reviewed_at` fields on MergeEvent are already in the schema waiting for this
+- `reviewed / reviewed_by / reviewed_at` fields on MergeEvent are already in the schema
 
-### Phase 4 — Chronicle Integration + Embeddings (Planned)
+## Phase 4 — Chronicle Integration + Embeddings (Planned)
 
-- Add `vector(1024)` columns to `entities` and `appearances` (already stubbed as comments in migration 0001)
+- Add `vector(1024)` columns to `entities` and `appearances` (commented-out SQL already in migration 0001)
 - Voyage AI embeddings for entities and appearances
 - pgvector similarity search
-- Chronicle integration (unclear scope — likely a companion service or consumer)
+- Chronicle integration
 
-### Phase 5 — Semantic Search (Optional)
+## Phase 5 — Semantic Search (Optional)
 
-- Natural language search over the entity/appearance corpus using embeddings from Phase 4
+- Natural language search over the entity/appearance corpus using Phase 4 embeddings
 
-## Known Schema TODOs (from migration comments)
+## Infrastructure TODOs
 
-- pgvector extension + embedding columns: already written as commented-out SQL in `001_initial_schema.py` — Phase 4 activation is a single `alembic revision` away
-
-## Structural TODOs
-
-- `app/services/` directory doesn't exist yet — needs to be created for Phase 1 extraction and resolver logic
-- No tests yet — `tests/` directory referenced in CLAUDE.md but doesn't exist; integration tests preferred per project conventions
-- Health endpoint returns 503 on DB failure but the `/health` route currently uses sync `check_db_connection()` — fine for now
+- `ruff`, `pytest`, `httpx` are dev deps installed manually — not in `requirements.txt`; consider adding a `requirements-dev.txt`
+- Test DB (`lore_test`) must be created manually — consider adding a `make test-db` target
+- No CI/CD yet
 
 ---
-## Session ended: 2026-05-27 16:39
-
----
-## Session ended: 2026-05-27 17:59
-
----
-## Session ended: 2026-05-27 18:00
+## Session ended: 2026-05-27 18:22

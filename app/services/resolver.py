@@ -21,7 +21,7 @@ _EXACT_NAME_SQL = text("""
 
 _EXACT_ALIAS_SQL = text("""
     SELECT id FROM entities
-    WHERE domain_id = :domain_id AND aliases @> ARRAY[:name]::varchar[]
+    WHERE domain_id = :domain_id AND :name = ANY(aliases)
     LIMIT 1
 """)
 

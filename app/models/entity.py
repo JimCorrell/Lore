@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, DateTime, ForeignKey, func
+from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -13,7 +13,7 @@ class Entity(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     canonical_name: Mapped[str] = mapped_column(String(512), nullable=False)
-    aliases: Mapped[list] = mapped_column(ARRAY(String), nullable=False, default=list)
+    aliases: Mapped[list] = mapped_column(ARRAY(Text()), nullable=False, default=list)
     # Python attr is entity_type to avoid shadowing SQLAlchemy's polymorphic `type`
     entity_type: Mapped[str] = mapped_column("type", String(64), nullable=False)
     domain_id: Mapped[str] = mapped_column(

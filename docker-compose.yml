@@ -1,0 +1,16 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: lore-postgres
+    environment:
+      POSTGRES_USER: lore
+      POSTGRES_PASSWORD: lore_dev
+      POSTGRES_DB: lore
+    ports:
+      - "5433:5432"
+    volumes:
+      - lore_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  lore_pgdata:

@@ -1,0 +1,7 @@
+.env
+.env.example
+# Claude Code — do not commit
+.claude/backups/
+
+# Claude Code — do not commit
+.claude/memory/auto-*
